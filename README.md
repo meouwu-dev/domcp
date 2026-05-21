@@ -109,7 +109,7 @@ For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. I
 ```
 
 - `extract_content(url)`: Fetches a page first, extracts the main readable content with Readability, converts it to Markdown with Turndown, and only renders with Chromium if the result is too thin. When `DOMCP_USER_DATA_DIR` is configured, this uses Chromium first by default so authenticated cookies from the persistent profile are available.
-- `navigate(url)`: Loads a URL in the persistent browser context and returns `{ contentMarkdown, elements }`, plus `activeDialog: { title }` when a modal is capturing interaction. Each element carries a `selector` handle and may be flagged `obscured` (covered by an overlay, not clickable) or `offscreen` (must be scrolled into view).
+- `navigate(url)`: Loads a URL in the persistent browser context and returns `{ contentMarkdown, elements }`, plus `activeDialog: { title }` when a modal is capturing interaction. Each element carries a `selector` handle, an optional `context` (the nearest descriptive heading, which identifies icon-only or generically-labeled controls like a product card's add button), and may be flagged `obscured` (covered by an overlay, not clickable) or `offscreen` (must be scrolled into view).
 - `click({ selector, ... })`: Clicks anything on the current page. You choose the target with a Playwright selector (CSS, `text=`, `role=`, label, placeholder, or xpath); the MCP does not restrict you to a fixed list. Each element in the latest `navigate`/`get_current_state` output carries a ready-to-use `selector` (a `[data-domcp-id="N"]` handle DOMCP injects — fast, unique, and immune to the accessibility-tree hangs that `role=` selectors cause on lazy-ARIA sites); prefer it. If a self-re-rendering page strips the handle between snapshots, call `get_current_state()` to re-stamp. Optional `nth`, `button`, `clickCount`, `modifiers`, `position`, and `force` map to Playwright click options. Pass `point: { x, y }` instead of `selector` for a raw coordinate click as a last resort.
 - `type_text({ selector | elementId, text })`: Fills an input or textarea. Target it with a Playwright selector for full flexibility, or with a numbered `elementId` from the discovery list.
 - `get_current_state()`: Re-reports the current browser page without navigating.
@@ -183,16 +183,16 @@ Environment variables:
 - `DOMCP_USER_DATA_DIR`: Optional Playwright profile directory for persistent cookies and login sessions.
 - `DOMCP_HEADLESS`: Set to `false` to show the Playwright Chromium window for manual login. Defaults to `true`.
 - `DOMCP_BROWSER_FIRST_WITH_PROFILE`: Defaults to `true` when `DOMCP_USER_DATA_DIR` is set. Set to `false` to force HTTP-first extraction even with a profile.
-- `DOMCP_REQUEST_DELAY_MS`: Per-domain request delay. Defaults to `1000`.
+- `DOMCP_REQUEST_DELAY_MS`: Politeness delay between requests to the same origin. Defaults to `0` (no artificial delay; a site's `robots.txt` `Crawl-delay` is still honored). Raise it to be gentler on a host.
 - `DOMCP_FETCH_TIMEOUT_MS`: Fetch timeout. Defaults to `15000`.
 - `DOMCP_NAVIGATION_TIMEOUT_MS`: Playwright navigation/action timeout. Defaults to `30000`.
-- `DOMCP_PAGE_READY_UNTIL`: Playwright page readiness state for navigation and short post-action waits. Defaults to `domcontentloaded`. Accepted values: `commit`, `domcontentloaded`, `load`, `networkidle`.
-- `DOMCP_RENDER_SETTLE_MS`: Extra settle time after navigation before extracting DOM content. Defaults to `750`.
-- `DOMCP_ACTION_SETTLE_MS`: Short settle time after click-like actions before extracting the next state. Defaults to `500`.
+- `DOMCP_PAGE_READY_UNTIL`: Playwright page readiness state for navigation and post-action waits. Defaults to `domcontentloaded`. Accepted values: `commit`, `domcontentloaded`, `load`, `networkidle`.
+- `DOMCP_DOM_QUIET_MS`: How long the DOM must be free of mutations before a page is treated as settled after navigation or an action. Defaults to `150`. Returns immediately on static pages.
+- `DOMCP_DOM_SETTLE_TIMEOUT_MS`: Hard cap on the settle wait for pages that keep re-rendering (e.g. SPAs). Defaults to `1500`.
 - `DOMCP_THIN_CONTENT_CHARS`: Markdown length threshold before escalating from fetch to browser rendering. Defaults to `200`.
 - `DOMCP_MAX_ELEMENTS`: Maximum clickable/form elements returned per page. Defaults to `80`.
 
-DOMCP checks `robots.txt` before fetch and navigation requests and applies the greater of the configured delay and the site's `Crawl-delay` directive when present.
+DOMCP checks `robots.txt` before fetch and navigation requests and applies the greater of the configured delay and the site's `Crawl-delay` directive when present. Instead of fixed post-navigation/post-action sleeps, it waits for the DOM to stop mutating (bounded by `DOMCP_DOM_SETTLE_TIMEOUT_MS`), so static pages are near-instant while dynamic pages still settle before the next state is read.
 
 ## License
 

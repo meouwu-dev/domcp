@@ -13,11 +13,17 @@ const USER_AGENT =
   process.env.DOMCP_USER_AGENT ??
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 DOMCP/0.1";
-const REQUEST_DELAY_MS = Number.parseInt(process.env.DOMCP_REQUEST_DELAY_MS ?? "1000", 10);
+// Politeness throttle between requests to the SAME origin. Defaults to 0: the agent is interactive,
+// not a bulk crawler, so we add no artificial delay. A site's robots.txt Crawl-delay is still honored
+// (see respectfulDelay), and users can raise this if they want to be gentler.
+const REQUEST_DELAY_MS = Number.parseInt(process.env.DOMCP_REQUEST_DELAY_MS ?? "0", 10);
 const FETCH_TIMEOUT_MS = Number.parseInt(process.env.DOMCP_FETCH_TIMEOUT_MS ?? "15000", 10);
 const NAVIGATION_TIMEOUT_MS = Number.parseInt(process.env.DOMCP_NAVIGATION_TIMEOUT_MS ?? "30000", 10);
-const RENDER_SETTLE_MS = Number.parseInt(process.env.DOMCP_RENDER_SETTLE_MS ?? "750", 10);
-const ACTION_SETTLE_MS = Number.parseInt(process.env.DOMCP_ACTION_SETTLE_MS ?? "500", 10);
+// How long the DOM must be mutation-free before we consider the page settled, and the hard cap on
+// that wait. This replaces fixed post-navigation/post-action sleeps: a static page returns after just
+// DOM_QUIET_MS, while an actively re-rendering SPA is allowed up to DOM_SETTLE_TIMEOUT_MS.
+const DOM_QUIET_MS = Number.parseInt(process.env.DOMCP_DOM_QUIET_MS ?? "150", 10);
+const DOM_SETTLE_TIMEOUT_MS = Number.parseInt(process.env.DOMCP_DOM_SETTLE_TIMEOUT_MS ?? "1500", 10);
 const THIN_CONTENT_CHARS = Number.parseInt(process.env.DOMCP_THIN_CONTENT_CHARS ?? "200", 10);
 const MAX_ELEMENTS = Number.parseInt(process.env.DOMCP_MAX_ELEMENTS ?? "80", 10);
 const USER_DATA_DIR = process.env.DOMCP_USER_DATA_DIR?.trim();
@@ -70,6 +76,7 @@ type ActionableElement = {
   id: number;
   role: "link" | "button" | "input" | "textarea";
   text: string;
+  context?: string;
   href?: string;
   selector: string;
   obscured?: boolean;
@@ -85,6 +92,7 @@ type BrowserActionableElement = {
   visible: boolean;
   role: ActionableElement["role"];
   text: string;
+  context?: string;
   href?: string;
   selector: string;
   obscured?: boolean;
@@ -374,18 +382,62 @@ async function closeBrowser() {
   currentContentMarkdown = "";
 }
 
+// Resolve as soon as the DOM stops changing for DOM_QUIET_MS, or after DOM_SETTLE_TIMEOUT_MS at the
+// latest. Replaces blind sleeps: instant on static pages, patient on pages that keep re-rendering
+// (client-side SPA updates that fire no navigation/load event). Created as runtime JS so dev runners
+// do not wrap it in a helper that breaks once serialized into the page.
+const waitForDomQuietInPage = new Function(
+  "options",
+  `
+return new Promise((resolve) => {
+  const quietMs = options.quietMs;
+  const maxMs = options.maxMs;
+  let quietTimer = null;
+  const finish = () => {
+    if (quietTimer) clearTimeout(quietTimer);
+    clearTimeout(hardCap);
+    observer.disconnect();
+    resolve();
+  };
+  const bump = () => {
+    if (quietTimer) clearTimeout(quietTimer);
+    quietTimer = setTimeout(finish, quietMs);
+  };
+  const observer = new MutationObserver(bump);
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    characterData: true,
+  });
+  const hardCap = setTimeout(finish, maxMs);
+  bump();
+});
+`,
+) as (options: { quietMs: number; maxMs: number }) => Promise<void>;
+
+async function waitForDomQuiet(activePage: Page) {
+  await activePage
+    .evaluate(waitForDomQuietInPage, { quietMs: DOM_QUIET_MS, maxMs: DOM_SETTLE_TIMEOUT_MS })
+    .catch(() => undefined);
+}
+
 async function gotoRespectfully(url: string) {
   await assertRobotsAllowed(url);
   await respectfulDelay(new URL(url));
   const activePage = await ensureBrowser();
   await activePage.goto(url, { waitUntil: PAGE_READY_UNTIL, timeout: NAVIGATION_TIMEOUT_MS });
-  await sleep(RENDER_SETTLE_MS);
+  await waitForDomQuiet(activePage);
   return activePage;
 }
 
 async function settleAfterAction(activePage: Page) {
-  await activePage.waitForLoadState(loadStateUntil(PAGE_READY_UNTIL), { timeout: ACTION_SETTLE_MS }).catch(() => undefined);
-  await sleep(ACTION_SETTLE_MS);
+  // A click may trigger a navigation; wait for it briefly, but don't block if none happens.
+  await activePage
+    .waitForLoadState(loadStateUntil(PAGE_READY_UNTIL), { timeout: DOM_SETTLE_TIMEOUT_MS })
+    .catch(() => undefined);
+  // Then wait only as long as the DOM is actually still churning.
+  await waitForDomQuiet(activePage);
 }
 
 function readableText(value: string | null | undefined) {
@@ -457,12 +509,37 @@ for (let index = 0; index < nodes.length; index += 1) {
 
   // Read visible text without decorative icon ligatures (e.g. Material <mat-icon>expand_more</mat-icon>),
   // which otherwise corrupt both the label shown to the agent and any text= selector built from it.
+  const iconSelector = "mat-icon, .material-icons, .material-icons-outlined, .material-symbols-outlined";
   const clone = element.cloneNode(true);
-  clone
-    .querySelectorAll('mat-icon, svg, [aria-hidden="true"], .material-icons, .material-icons-outlined, .material-symbols-outlined')
-    .forEach((node) => node.remove());
+  clone.querySelectorAll(iconSelector + ', svg, [aria-hidden="true"]').forEach((node) => node.remove());
   const visibleText = (clone.textContent || "").replace(/\\s+/g, " ").trim();
-  const accessibleName = (visibleText || aria || title || placeholder || value || "").replace(/\\s+/g, " ").trim();
+  // For an icon-only control the glyph name (e.g. "add", "delete") is the only label there is, so fall
+  // back to it rather than emitting empty text — otherwise the control would be dropped entirely.
+  const iconText = Array.from(element.querySelectorAll(iconSelector))
+    .map((node) => (node.textContent || "").replace(/\\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ");
+  const accessibleName = (visibleText || aria || title || placeholder || value || iconText || "")
+    .replace(/\\s+/g, " ")
+    .trim();
+
+  // Nearest descriptive heading above this control, so action buttons whose own label is generic
+  // ("add") or icon-only can still be tied to what they act on (e.g. a product card's title).
+  let context = "";
+  let ancestor = element.parentElement;
+  let hops = 0;
+  while (ancestor && hops < 6) {
+    const heading = ancestor.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]');
+    if (heading) {
+      const headingText = (heading.textContent || "").replace(/\\s+/g, " ").trim();
+      if (headingText && headingText !== accessibleName && headingText.length <= 120) {
+        context = headingText;
+        break;
+      }
+    }
+    ancestor = ancestor.parentElement;
+    hops += 1;
+  }
 
   // Single targeting handle: a unique attribute we stamp ourselves. Pure CSS attribute match, so it is
   // fast and unambiguous, and avoids the accessibility-tree walk that hangs on lazy-ARIA frameworks.
@@ -475,6 +552,7 @@ for (let index = 0; index < nodes.length; index += 1) {
     visible,
     role,
     text: accessibleName,
+    context: context || undefined,
     href,
     selector: '[data-domcp-id="' + domcpId + '"]',
     obscured: obscured || undefined,
@@ -501,12 +579,13 @@ async function collectActionableElements(activePage: Page): Promise<InternalActi
   domcpIdCounter = base + elements.length;
 
   return elements
-    .filter((element) => element.text || element.href)
+    .filter((element) => element.text || element.href || element.context)
     .slice(0, MAX_ELEMENTS)
     .map((element, id) => ({
       id,
       role: element.role as ActionableElement["role"],
       text: readableText(element.text || element.href),
+      context: element.context,
       href: element.href,
       selector: element.selector,
       obscured: element.obscured,
@@ -653,7 +732,7 @@ const server = new McpServer({
   version: "0.1.0",
 }, {
   instructions:
-    "Use DOMCP as a DOM-first browser tool. For substantial browsing tasks, first load the MCP prompt /mcp__domcp__agent_guide when the client supports MCP prompts. Prefer navigate and get_current_state to read content and discover action targets. There is one click tool: you pick any target with a Playwright selector (css, text=, role=, xpath) and optional click options, so you are not limited to the numbered elements list. Each element has a ready selector; an element flagged obscured is currently covered (e.g. behind a modal) and clicking it will fail, while offscreen means it must be scrolled into view first. When page state includes activeDialog, a modal is capturing interaction — act on its controls before any element not inside it. Use type_text with a selector or numbered elementId for inputs. Use screenshot only as a last fallback when DOM content/action targets are insufficient. Explain why before using screenshot.",
+    "Use DOMCP as a DOM-first browser tool. For substantial browsing tasks, first load the MCP prompt /mcp__domcp__agent_guide when the client supports MCP prompts. Prefer navigate and get_current_state to read content and discover action targets. There is one click tool: you pick any target with a Playwright selector (css, text=, role=, xpath) and optional click options, so you are not limited to the numbered elements list. Each element has a ready selector; its context field (when present) is the nearest descriptive heading, which identifies icon-only or generically-labeled controls such as an add button inside a product card. An element flagged obscured is currently covered (e.g. behind a modal) and clicking it will fail, while offscreen means it must be scrolled into view first. When page state includes activeDialog, a modal is capturing interaction — act on its controls before any element not inside it. Use type_text with a selector or numbered elementId for inputs. Use screenshot only as a last fallback when DOM content/action targets are insufficient. Explain why before using screenshot.",
 });
 
 server.prompt(

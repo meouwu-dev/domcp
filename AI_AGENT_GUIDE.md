@@ -90,6 +90,7 @@ Use `elements` when deciding what to act on. Each element provides:
 
 - `selector`: its `[data-domcp-id="N"]` handle — the target for `click`/`type_text`. Always prefer this.
 - `role`, `text`, `href`: human context to pick the right element.
+- `context` (only when set): the nearest descriptive heading above the control. Use it to identify icon-only or generically-labeled controls — e.g. an `{ role: "button", text: "add" }` whose `context` is `"Green Supreme - Golden Crust (Large)"` is that product's add button. Match on `context`, then click the `selector` handle.
 - `obscured: true` (only when set): the element is currently covered by something painted over it (commonly a modal backdrop, cookie banner, or sticky bar). Clicking it will fail/time out — do not target it until whatever covers it is dismissed.
 - `offscreen: true` (only when set): the element is outside the viewport and must be scrolled into view before it can be clicked.
 
