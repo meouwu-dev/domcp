@@ -100,7 +100,7 @@ claude mcp add-json --scope project domcp '{
 
 ## Tools
 
-DOMCP also sends server-level MCP instructions to clients: use `navigate` and `get_current_state` first, interact with numbered targets via `click` or `type_text`, use `click_text` for visible DOM text that is not exposed as a numbered target, and call `screenshot` only as a last fallback after explaining why DOM output was insufficient.
+DOMCP also sends server-level MCP instructions to clients: use `navigate` and `get_current_state` first, then interact with a single flexible `click` tool (you pick any target with a Playwright selector) and `type_text`, and call `screenshot` only as a last fallback after explaining why DOM output was insufficient.
 
 For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. In Claude Code, load the same guide with:
 
@@ -109,10 +109,9 @@ For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. I
 ```
 
 - `extract_content(url)`: Fetches a page first, extracts the main readable content with Readability, converts it to Markdown with Turndown, and only renders with Chromium if the result is too thin. When `DOMCP_USER_DATA_DIR` is configured, this uses Chromium first by default so authenticated cookies from the persistent profile are available.
-- `navigate(url)`: Loads a URL in the persistent browser context and returns `{ contentMarkdown, elements }`.
-- `click(elementId)`: Clicks a numbered link, button, input, textarea, or ARIA link/button from the current page and returns the new state.
-- `click_text(text, exact?, occurrence?)`: Fallback DOM action that clicks visible text on the current page when the target appears in `contentMarkdown` but is not exposed as a numbered element. Useful for custom cards, rows, and non-semantic clickable containers.
-- `type_text(elementId, text)`: Fills a numbered input or textarea.
+- `navigate(url)`: Loads a URL in the persistent browser context and returns `{ contentMarkdown, elements }`, plus `activeDialog: { title }` when a modal is capturing interaction. Each element carries a `selector` handle and may be flagged `obscured` (covered by an overlay, not clickable) or `offscreen` (must be scrolled into view).
+- `click({ selector, ... })`: Clicks anything on the current page. You choose the target with a Playwright selector (CSS, `text=`, `role=`, label, placeholder, or xpath); the MCP does not restrict you to a fixed list. Each element in the latest `navigate`/`get_current_state` output carries a ready-to-use `selector` (a `[data-domcp-id="N"]` handle DOMCP injects — fast, unique, and immune to the accessibility-tree hangs that `role=` selectors cause on lazy-ARIA sites); prefer it. If a self-re-rendering page strips the handle between snapshots, call `get_current_state()` to re-stamp. Optional `nth`, `button`, `clickCount`, `modifiers`, `position`, and `force` map to Playwright click options. Pass `point: { x, y }` instead of `selector` for a raw coordinate click as a last resort.
+- `type_text({ selector | elementId, text })`: Fills an input or textarea. Target it with a Playwright selector for full flexibility, or with a numbered `elementId` from the discovery list.
 - `get_current_state()`: Re-reports the current browser page without navigating.
 - `screenshot()`: Last-fallback screenshot tool for canvas, WebGL, visually ambiguous pages, or broken DOM extraction. The client should explain why DOM output was insufficient before calling it.
 - `close()`: Closes the persistent browser context.
@@ -121,10 +120,9 @@ For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. I
 
 1. Call `navigate` with a URL.
 2. Read `contentMarkdown` for the cleaned page content.
-3. Inspect `elements`, choose a numbered target, then call `click` with that `elementId`.
+3. Inspect `elements` and call `click` with the element's provided `selector` (the `[data-domcp-id="N"]` handle), e.g. `{ selector: "[data-domcp-id=\"3\"]" }`. You can also pass any Playwright selector of your own, such as `{ selector: "text=Sign In" }`.
 4. Repeat `click` or call `type_text` for forms.
-5. If desired visible text is present but missing from `elements`, try `click_text`.
-6. Use `screenshot` only if the DOM output is not enough to understand or operate the page.
+5. Use `screenshot` only if the DOM output is not enough to understand or operate the page.
 
 Example response shape:
 
@@ -137,8 +135,22 @@ Example response shape:
       "id": 0,
       "role": "link",
       "text": "More information...",
-      "href": "https://www.iana.org/domains/example"
+      "href": "https://www.iana.org/domains/example",
+      "selector": "[data-domcp-id=\"0\"]"
     }
+  ]
+}
+```
+
+When a modal is open, the state also reports it, and background controls are flagged so the agent acts inside the dialog instead of clicking inert elements behind it:
+
+```json
+{
+  "url": "https://example.com/order",
+  "activeDialog": { "title": "Pickup Time" },
+  "elements": [
+    { "id": 0, "role": "button", "text": "Change Dining Time", "selector": "[data-domcp-id=\"0\"]", "obscured": true },
+    { "id": 1, "role": "button", "text": "Continue", "selector": "[data-domcp-id=\"1\"]" }
   ]
 }
 ```

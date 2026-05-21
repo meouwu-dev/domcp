@@ -8,22 +8,20 @@ DOMCP is a DOM-first browsing MCP. Treat the structured DOM output as the main i
 
 Use this order:
 
-1. Use DOM tools first: `navigate`, `get_current_state`, `click`, `click_text`, and `type_text`.
+1. Use DOM tools first: `navigate`, `get_current_state`, `click`, and `type_text`.
 2. Read `contentMarkdown` for page meaning.
-3. Read `elements` for numbered interaction targets.
-4. Act on numbered targets with `click` or `type_text`.
-5. If the desired visible text exists but no numbered target is exposed, use `click_text`.
-6. Use `screenshot` only when DOM output is insufficient, and explain why before using it.
-7. Ask the user to interact manually only when the action requires human control, credentials, CAPTCHA, payment confirmation, 2FA, or a browser state the agent cannot reach safely.
+3. Read `elements` for discovery context (role, text, href) to help you build selectors.
+4. Act with `click` (a Playwright selector you choose) or `type_text`.
+5. Use `screenshot` only when DOM output is insufficient, and explain why before using it.
+6. Ask the user to interact manually only when the action requires human control, credentials, CAPTCHA, payment confirmation, 2FA, or a browser state the agent cannot reach safely.
 
 ## Tool Roles
 
 - `extract_content(url)`: Fast content extraction for pages where you only need readable text. It does not maintain a browser interaction loop.
-- `navigate(url)`: Open a page in the persistent Chromium context and return both readable content and numbered action targets. Use this for most browsing tasks.
+- `navigate(url)`: Open a page in the persistent Chromium context and return both readable content and action targets (each with a ready-to-use `selector`). Use this for most browsing tasks.
 - `get_current_state()`: Re-read the current page after waiting, user interaction, or a suspected page update.
-- `click(elementId)`: Click a numbered target from the latest `navigate` or `get_current_state` result.
-- `click_text(text, exact?, occurrence?)`: Fallback DOM action for visible text that appears in `contentMarkdown` but is not exposed as a numbered target. Use this for custom cards, rows, tiles, and non-semantic clickable containers before screenshot.
-- `type_text(elementId, text)`: Fill a numbered input or textarea.
+- `click({ selector, ... })`: Click anything on the current page. Prefer the `selector` each element already provides (a `[data-domcp-id="N"]` handle DOMCP injects): it is a fast, unique CSS match. If a self-re-rendering page strips the handle between snapshots, call `get_current_state()` to re-stamp, then use the fresh `selector`. You may also pass any Playwright selector of your own (CSS, `text=`, `role=`, label, placeholder, xpath). Optional `nth`, `button`, `clickCount`, `modifiers`, `position`, and `force` mirror Playwright click options. Use `point: { x, y }` for a raw coordinate click as a last resort. Avoid hand-writing `role=...[name=...]` selectors on lazy-ARIA sites (e.g. Angular Material) — they can hang on the accessibility-tree walk; the injected handle and `text=` are safe.
+- `type_text({ selector | elementId, text })`: Fill an input or textarea by selector (flexible) or by a numbered `elementId`.
 - `screenshot()`: Last fallback when DOM output cannot answer what is visible or what to do next.
 - `close()`: Close the browser context when the task is finished or stale.
 
@@ -32,13 +30,12 @@ Use this order:
 1. Start with `navigate(url)` when the user asks to browse, choose, order, search, or interact with a site.
 2. Inspect the returned `url`, `contentMarkdown`, and `elements`.
 3. Use `contentMarkdown` to understand page state, available options, errors, confirmations, and instructions.
-4. Use `elements` to find the best action target by `id`, `role`, `text`, and `href`.
-5. Call `click(elementId)` for navigation, selection, buttons, tabs, menu items, and clickable rows.
-6. Call `type_text(elementId, text)` for search boxes, address fields, forms, and other text inputs.
-7. If the desired target appears in `contentMarkdown` but not in `elements`, call `click_text(text)`.
-8. After each action, inspect the returned state before deciding the next action.
-9. If the page updates asynchronously and the returned state looks stale, call `get_current_state()`.
-10. Repeat until the user goal is complete or a human decision/action is required.
+4. Use `elements` to find the target; each one carries a ready `selector` (its `[data-domcp-id="N"]` handle) plus `text`, `role`, and `href` to identify it.
+5. Call `click({ selector })` with that handle for navigation, selection, buttons, tabs, menu items, and clickable rows — e.g. `{ selector: "[data-domcp-id=\"7\"]" }`. You can also pass your own selector such as `{ selector: "text=Add to cart" }`.
+6. Call `type_text({ selector, text })` for search boxes, address fields, forms, and other text inputs.
+7. After each action, inspect the returned state before deciding the next action.
+8. If the page updates asynchronously and the returned state looks stale, call `get_current_state()`.
+9. Repeat until the user goal is complete or a human decision/action is required.
 
 ## Headless And Visible Browser Use
 
@@ -78,7 +75,7 @@ Before calling `screenshot`, state the reason in plain language:
 - "The page appears to render the product grid visually but not in readable DOM text, so I need a screenshot as fallback."
 - "The current state is canvas-based and `elements` is empty, so DOM navigation cannot identify the next action."
 
-After using `screenshot`, return to DOM tools whenever possible. If the screenshot reveals a labeled target that is also in `elements`, use `click` with the numbered element instead of relying on vision.
+After using `screenshot`, return to DOM tools whenever possible. If the screenshot reveals a labeled target, click it with a `text=` or `role=` selector instead of relying on vision. Use `point: { x, y }` only when no selector can reach it.
 
 ## Choosing Between Content And Actions
 
@@ -89,19 +86,23 @@ Use `contentMarkdown` when deciding:
 - Which item, store, product, or option best matches the user request.
 - Whether an action succeeded.
 
-Use `elements` when deciding:
+Use `elements` when deciding what to act on. Each element provides:
 
-- What can be clicked or filled.
-- Which numbered ID to pass to `click` or `type_text`.
-- Whether a link can be navigated by `href`.
-- Whether a desired target is missing from DOMCP's clickable target list.
+- `selector`: its `[data-domcp-id="N"]` handle — the target for `click`/`type_text`. Always prefer this.
+- `role`, `text`, `href`: human context to pick the right element.
+- `obscured: true` (only when set): the element is currently covered by something painted over it (commonly a modal backdrop, cookie banner, or sticky bar). Clicking it will fail/time out — do not target it until whatever covers it is dismissed.
+- `offscreen: true` (only when set): the element is outside the viewport and must be scrolled into view before it can be clicked.
 
-If the content mentions an option but no matching element exists, try:
+The page state also includes `activeDialog: { title }` when a modal is capturing interaction. When present, act on controls **inside** the dialog first (the obscured background elements are inert); finish or dismiss the dialog before targeting anything flagged `obscured`.
 
-1. Call `get_current_state()` once in case the page changed.
-2. Look for nearby text, shorter labels, icons, tabs, or parent-row text in `elements`.
-3. Use `click_text` with the most specific visible label, such as a store name or product title.
-4. If still missing and the page is visible, explain the limitation and ask the user to click it manually.
+`elements` is a hint, not a limit. You can target anything in the DOM with a `click` selector even if it is not listed.
+
+If the content mentions an option but you cannot find a clean target, try:
+
+1. Call `get_current_state()` once in case the page changed (this also re-stamps fresh `data-domcp-id` handles).
+2. Use the element's `selector`; if it no longer matches after a dynamic page update, call `get_current_state()` again to re-stamp, then use the fresh handle.
+3. As a manual alternative, build a `text=` selector from the most specific visible label, such as a store name or product title — e.g. `{ selector: "text=Whole Foods Market" }`. Pass `nth` to disambiguate multiple matches.
+4. If the page is visible and the target still cannot be reached safely, explain the limitation and ask the user to click it manually.
 5. If visual inspection could solve it and manual action is not required, explain why and use `screenshot`.
 
 ## Handling Common Sites
@@ -110,8 +111,8 @@ Many modern sites use JavaScript and custom components. DOMCP detects native con
 
 If a site has poorly labeled controls:
 
-- Prefer visible text from `elements`.
-- Use stable labels, product names, store names, addresses, or prices to identify targets.
+- Prefer the element's provided `selector` (its `[data-domcp-id]` handle); it works even when a control is unlabeled or icon-only.
+- Use the `text`, `role`, and `href` fields, plus stable labels, product names, store names, addresses, or prices, to identify which element you want.
 - Avoid guessing based only on element order unless the page state makes it obvious.
 - If multiple targets look similar, ask a concise clarification or use more page context.
 
@@ -120,10 +121,10 @@ If a site has poorly labeled controls:
 For forms:
 
 1. Use `navigate` or `get_current_state`.
-2. Identify inputs in `elements` by placeholder, label text, or nearby context.
-3. Use `type_text` for each text field.
+2. Identify inputs by placeholder, label text, or nearby context (use `elements` for hints).
+3. Use `type_text({ selector, text })` for each text field, e.g. `{ selector: "role=textbox[name='Email']" }`.
 4. Re-read state if the form performs validation or enables buttons dynamically.
-5. Use `click` for submit/search/continue.
+5. Use `click({ selector })` for submit/search/continue.
 6. Verify the result in the returned state.
 
 Never enter sensitive information unless the user explicitly provided it for this task. For passwords, 2FA, payment details, or identity verification, ask the user to type them in the visible browser.
@@ -153,11 +154,18 @@ Keep the request specific. Tell the user what to click/type and what to say when
 
 ## Recovery Patterns
 
-If a click seems to do nothing:
+If a click times out or seems to do nothing:
 
 1. Call `get_current_state()`.
 2. Check whether the URL, content, or elements changed.
-3. If nothing changed, the site may need a more specific target, a wait, or manual action.
+3. Check `activeDialog` and the target's `obscured`/`offscreen` flags. If the target is `obscured`, a modal or overlay is on top — handle the dialog (or dismiss the banner) first. If `offscreen`, scroll it into view before clicking.
+4. If nothing changed and nothing is covering the target, the site may need a more specific target, a wait, or manual action.
+
+If a target you want is flagged `obscured` and `activeDialog` is set:
+
+1. Read the dialog's controls (the elements that are not obscured) and complete or dismiss it — e.g. submit the form, or click its close/cancel control.
+2. Call `get_current_state()` to confirm the dialog closed and re-stamp handles.
+3. Then act on the previously obscured target.
 
 If the page looks like a login page unexpectedly:
 
@@ -182,7 +190,7 @@ If DOM extraction fails:
 Agents can adapt this into a skill:
 
 ```text
-Use DOMCP as a DOM-first browser. For interactive browsing, start with navigate(url), then inspect contentMarkdown and elements. Use contentMarkdown to understand page state and use numbered elements for click(elementId) and type_text(elementId, text). If the desired visible text appears in contentMarkdown but is not exposed as a numbered target, use click_text(text) before screenshot. After every action, inspect the returned state before continuing. Use get_current_state() after user interaction, asynchronous page updates, or when the page may have changed.
+Use DOMCP as a DOM-first browser. For interactive browsing, start with navigate(url), then inspect contentMarkdown and elements. Use contentMarkdown to understand page state and use elements as discovery context. There is one click tool: click({ selector }) where selector is any Playwright selector (css, text=, role=, xpath), so you can target anything in the DOM, not just the listed elements. Use type_text({ selector, text }) for inputs (elementId is also accepted). After every action, inspect the returned state before continuing. Use get_current_state() after user interaction, asynchronous page updates, or when the page may have changed.
 
 Do not use screenshot by default. Screenshot is a last fallback only when DOM content/action targets are insufficient, such as canvas/WebGL, visually ambiguous controls, image-only pages, or broken DOM extraction. Before calling screenshot, explain why DOM output is insufficient. After screenshot, return to DOM tools whenever possible.
 
@@ -201,13 +209,12 @@ Need to browse or interact?
   Use navigate(url).
 
 Need to choose next step?
-  Read contentMarkdown and elements.
+  Read contentMarkdown and elements (discovery context).
 
-Target is numbered?
-  Use click(elementId) or type_text(elementId, text).
-
-Target text is visible but not numbered?
-  Use click_text(text).
+Need to act on a target?
+  Use click({ selector }) or type_text({ selector, text }) with any Playwright selector.
+  Build selectors from visible text (text=...), roles (role=...), CSS, or xpath.
+  Use point {x,y} only as a raw coordinate last resort.
 
 Page may have changed?
   Use get_current_state().
