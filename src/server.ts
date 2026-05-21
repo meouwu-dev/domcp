@@ -41,6 +41,14 @@ type InternalActionableElement = ActionableElement & {
   selectorIndex: number;
 };
 
+type BrowserActionableElement = {
+  selectorIndex: number;
+  visible: boolean;
+  role: ActionableElement["role"];
+  text: string;
+  href?: string;
+};
+
 type ToolPayload = Record<string, unknown> | string;
 
 type RobotsRules = {
@@ -318,6 +326,55 @@ function readableText(value: string | null | undefined) {
   return (value ?? "").replace(/\s+/g, " ").trim();
 }
 
+// Keep this page-side function as runtime-created JavaScript. Dev runners such
+// as tsx/esbuild can wrap inline callbacks in __name(...), and Playwright then
+// serializes that wrapper into the browser context where __name is undefined.
+const collectActionableElementsInPage = new Function(
+  "nodes",
+  `
+const results = [];
+
+for (let index = 0; index < nodes.length; index += 1) {
+  const element = nodes[index];
+  const style = window.getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  const visible =
+    style.visibility !== "hidden" &&
+    style.display !== "none" &&
+    rect.width > 0 &&
+    rect.height > 0;
+
+  const tag = element.tagName.toLowerCase();
+  const declaredRole = element.getAttribute("role");
+  const role =
+    tag === "a" || declaredRole === "link"
+      ? "link"
+      : tag === "textarea"
+        ? "textarea"
+        : tag === "input"
+          ? "input"
+          : "button";
+
+  const aria = element.getAttribute("aria-label");
+  const title = element.getAttribute("title");
+  const placeholder = element.getAttribute("placeholder");
+  const value = element instanceof HTMLInputElement ? element.value : "";
+  const text = element.textContent;
+  const href = element instanceof HTMLAnchorElement ? element.href : undefined;
+
+  results.push({
+    selectorIndex: index,
+    visible,
+    role,
+    text: (aria || title || placeholder || value || text || "").replace(/\\s+/g, " ").trim(),
+    href,
+  });
+}
+
+return results.filter((element) => element.visible);
+`,
+) as (nodes: Element[]) => BrowserActionableElement[];
+
 async function getRenderedMarkdown(activePage: Page) {
   const html = await activePage.content();
   const { markdown } = htmlToMarkdown(html, activePage.url());
@@ -325,45 +382,9 @@ async function getRenderedMarkdown(activePage: Page) {
 }
 
 async function collectActionableElements(activePage: Page): Promise<InternalActionableElement[]> {
-  const elements = await activePage.locator("a[href], button, input, textarea, [role='button'], [role='link']").evaluateAll((nodes) => {
-    const isVisible = (element: Element) => {
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-    };
-
-    const accessibleName = (element: Element) => {
-      const aria = element.getAttribute("aria-label");
-      const title = element.getAttribute("title");
-      const placeholder = element.getAttribute("placeholder");
-      const value = element instanceof HTMLInputElement ? element.value : "";
-      const text = element.textContent;
-      return (aria || title || placeholder || value || text || "").replace(/\s+/g, " ").trim();
-    };
-
-    return nodes
-      .map((element, index) => {
-        const tag = element.tagName.toLowerCase();
-        const declaredRole = element.getAttribute("role");
-        const role =
-          tag === "a" || declaredRole === "link"
-            ? "link"
-            : tag === "textarea"
-              ? "textarea"
-              : tag === "input"
-                ? "input"
-                : "button";
-        const anchor = element instanceof HTMLAnchorElement ? element : undefined;
-        return {
-          selectorIndex: index,
-          visible: isVisible(element),
-          role,
-          text: accessibleName(element),
-          href: anchor?.href,
-        };
-      })
-      .filter((element) => element.visible);
-  });
+  const elements = await activePage
+    .locator("a[href], button, input, textarea, [role='button'], [role='link']")
+    .evaluateAll(collectActionableElementsInPage);
 
   return elements
     .filter((element) => element.text || element.href)
