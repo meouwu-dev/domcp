@@ -81,14 +81,39 @@ claude mcp add --transport stdio --scope project `
   domcp -- node.exe <absolute-path-to-domcp>/dist/server.js
 ```
 
+Claude Code project-scoped setup using the TypeScript source entrypoint:
+
+```bash
+claude mcp add-json --scope project domcp '{
+  "type": "stdio",
+  "command": "node.exe",
+  "args": [
+    "../domcp/node_modules/tsx/dist/cli.mjs",
+    "../domcp/src/server.ts"
+  ],
+  "env": {
+    "DOMCP_USER_DATA_DIR": "./.domcp-profile",
+    "DOMCP_HEADLESS": "false"
+  }
+}'
+```
+
 ## Tools
+
+DOMCP also sends server-level MCP instructions to clients: use `navigate` and `get_current_state` first, interact with numbered targets via `click` or `type_text`, and call `screenshot` only as a last fallback after explaining why DOM output was insufficient.
+
+For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. In Claude Code, load the same guide with:
+
+```text
+/mcp__domcp__agent_guide
+```
 
 - `extract_content(url)`: Fetches a page first, extracts the main readable content with Readability, converts it to Markdown with Turndown, and only renders with Chromium if the result is too thin. When `DOMCP_USER_DATA_DIR` is configured, this uses Chromium first by default so authenticated cookies from the persistent profile are available.
 - `navigate(url)`: Loads a URL in the persistent browser context and returns `{ contentMarkdown, elements }`.
 - `click(elementId)`: Clicks a numbered link, button, input, textarea, or ARIA link/button from the current page and returns the new state.
 - `type_text(elementId, text)`: Fills a numbered input or textarea.
 - `get_current_state()`: Re-reports the current browser page without navigating.
-- `screenshot()`: Fallback-only screenshot tool for canvas, WebGL, or visually ambiguous pages where DOM tools fail.
+- `screenshot()`: Last-fallback screenshot tool for canvas, WebGL, visually ambiguous pages, or broken DOM extraction. The client should explain why DOM output was insufficient before calling it.
 - `close()`: Closes the persistent browser context.
 
 ## Example Loop

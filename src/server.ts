@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
+import { readFile } from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import TurndownService from "turndown";
 import { z } from "zod";
@@ -18,6 +19,22 @@ const NAVIGATION_TIMEOUT_MS = Number.parseInt(process.env.DOMCP_NAVIGATION_TIMEO
 const THIN_CONTENT_CHARS = Number.parseInt(process.env.DOMCP_THIN_CONTENT_CHARS ?? "200", 10);
 const MAX_ELEMENTS = Number.parseInt(process.env.DOMCP_MAX_ELEMENTS ?? "80", 10);
 const USER_DATA_DIR = process.env.DOMCP_USER_DATA_DIR?.trim();
+const ACTIONABLE_SELECTOR = [
+  "a[href]",
+  "button",
+  "input",
+  "textarea",
+  "[role='button']",
+  "[role='link']",
+  "[role='menuitem']",
+  "[role='option']",
+  "[role='tab']",
+  "[onclick]",
+  "[tabindex]:not([tabindex='-1'])",
+  "[matripple]",
+  ".mat-ripple",
+  "mat-list-item",
+].join(", ");
 
 function envFlag(value: string | undefined, defaultValue: boolean) {
   if (!value) {
@@ -29,6 +46,7 @@ function envFlag(value: string | undefined, defaultValue: boolean) {
 
 const HEADLESS = envFlag(process.env.DOMCP_HEADLESS, true);
 const BROWSER_FIRST_WITH_PROFILE = envFlag(process.env.DOMCP_BROWSER_FIRST_WITH_PROFILE, Boolean(USER_DATA_DIR));
+const AI_AGENT_GUIDE_URL = new URL("../AI_AGENT_GUIDE.md", import.meta.url);
 
 type ActionableElement = {
   id: number;
@@ -383,7 +401,7 @@ async function getRenderedMarkdown(activePage: Page) {
 
 async function collectActionableElements(activePage: Page): Promise<InternalActionableElement[]> {
   const elements = await activePage
-    .locator("a[href], button, input, textarea, [role='button'], [role='link']")
+    .locator(ACTIONABLE_SELECTOR)
     .evaluateAll(collectActionableElementsInPage);
 
   return elements
@@ -440,7 +458,7 @@ async function clickCurrentElement(elementId: number) {
     throw new Error(`No element with id ${elementId}. Call navigate() or get_current_state() first.`);
   }
 
-  const target = activePage.locator("a[href], button, input, textarea, [role='button'], [role='link']").nth(element.selectorIndex);
+  const target = activePage.locator(ACTIONABLE_SELECTOR).nth(element.selectorIndex);
 
   await Promise.all([
     activePage.waitForLoadState("networkidle", { timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined),
@@ -462,16 +480,40 @@ async function typeIntoCurrentElement(elementId: number, text: string) {
     throw new Error(`Element ${elementId} is a ${element.role}, not a text input.`);
   }
 
-  const target = activePage.locator("a[href], button, input, textarea, [role='button'], [role='link']").nth(element.selectorIndex);
+  const target = activePage.locator(ACTIONABLE_SELECTOR).nth(element.selectorIndex);
   await target.fill(text, { timeout: NAVIGATION_TIMEOUT_MS });
   await pageState(activePage);
   return { ok: true };
 }
 
+async function getAgentGuide() {
+  return readFile(AI_AGENT_GUIDE_URL, "utf8");
+}
+
 const server = new McpServer({
   name: "domcp",
   version: "0.1.0",
+}, {
+  instructions:
+    "Use DOMCP as a DOM-first browser tool. For substantial browsing tasks, first load the MCP prompt /mcp__domcp__agent_guide when the client supports MCP prompts. Prefer navigate and get_current_state to read content and discover numbered action targets, then use click or type_text for interaction. Use screenshot only as a last fallback when DOM content/action targets are insufficient. Explain why before using screenshot.",
 });
+
+server.prompt(
+  "agent_guide",
+  "Load the DOMCP AI-agent workflow guide, including DOM-first browsing, visible-browser handoff, and screenshot-last rules.",
+  async () => ({
+    description: "DOMCP AI-agent workflow guide",
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: await getAgentGuide(),
+        },
+      },
+    ],
+  }),
+);
 
 server.tool(
   "extract_content",
@@ -517,7 +559,7 @@ server.tool(
 
 server.tool(
   "screenshot",
-  "Fallback-only vision escape hatch. Use this only when DOM content and action targets are insufficient, such as canvas/WebGL or visually ambiguous pages.",
+  "Last fallback only. Before calling screenshot, explain why DOM content/action targets from navigate or get_current_state are insufficient, such as canvas/WebGL, visually ambiguous pages, or broken DOM extraction.",
   {},
   async () =>
     withToolErrors(async () => {
