@@ -100,7 +100,7 @@ claude mcp add-json --scope project domcp '{
 
 ## Tools
 
-DOMCP also sends server-level MCP instructions to clients: use `navigate` and `get_current_state` first, interact with numbered targets via `click` or `type_text`, and call `screenshot` only as a last fallback after explaining why DOM output was insufficient.
+DOMCP also sends server-level MCP instructions to clients: use `navigate` and `get_current_state` first, interact with numbered targets via `click` or `type_text`, use `click_text` for visible DOM text that is not exposed as a numbered target, and call `screenshot` only as a last fallback after explaining why DOM output was insufficient.
 
 For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. In Claude Code, load the same guide with:
 
@@ -111,6 +111,7 @@ For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. I
 - `extract_content(url)`: Fetches a page first, extracts the main readable content with Readability, converts it to Markdown with Turndown, and only renders with Chromium if the result is too thin. When `DOMCP_USER_DATA_DIR` is configured, this uses Chromium first by default so authenticated cookies from the persistent profile are available.
 - `navigate(url)`: Loads a URL in the persistent browser context and returns `{ contentMarkdown, elements }`.
 - `click(elementId)`: Clicks a numbered link, button, input, textarea, or ARIA link/button from the current page and returns the new state.
+- `click_text(text, exact?, occurrence?)`: Fallback DOM action that clicks visible text on the current page when the target appears in `contentMarkdown` but is not exposed as a numbered element. Useful for custom cards, rows, and non-semantic clickable containers.
 - `type_text(elementId, text)`: Fills a numbered input or textarea.
 - `get_current_state()`: Re-reports the current browser page without navigating.
 - `screenshot()`: Last-fallback screenshot tool for canvas, WebGL, visually ambiguous pages, or broken DOM extraction. The client should explain why DOM output was insufficient before calling it.
@@ -122,7 +123,8 @@ For a full agent workflow and skill-writing template, see `AI_AGENT_GUIDE.md`. I
 2. Read `contentMarkdown` for the cleaned page content.
 3. Inspect `elements`, choose a numbered target, then call `click` with that `elementId`.
 4. Repeat `click` or call `type_text` for forms.
-5. Use `screenshot` only if the DOM output is not enough to understand or operate the page.
+5. If desired visible text is present but missing from `elements`, try `click_text`.
+6. Use `screenshot` only if the DOM output is not enough to understand or operate the page.
 
 Example response shape:
 
@@ -172,6 +174,9 @@ Environment variables:
 - `DOMCP_REQUEST_DELAY_MS`: Per-domain request delay. Defaults to `1000`.
 - `DOMCP_FETCH_TIMEOUT_MS`: Fetch timeout. Defaults to `15000`.
 - `DOMCP_NAVIGATION_TIMEOUT_MS`: Playwright navigation/action timeout. Defaults to `30000`.
+- `DOMCP_PAGE_READY_UNTIL`: Playwright page readiness state for navigation and short post-action waits. Defaults to `domcontentloaded`. Accepted values: `commit`, `domcontentloaded`, `load`, `networkidle`.
+- `DOMCP_RENDER_SETTLE_MS`: Extra settle time after navigation before extracting DOM content. Defaults to `750`.
+- `DOMCP_ACTION_SETTLE_MS`: Short settle time after click-like actions before extracting the next state. Defaults to `500`.
 - `DOMCP_THIN_CONTENT_CHARS`: Markdown length threshold before escalating from fetch to browser rendering. Defaults to `200`.
 - `DOMCP_MAX_ELEMENTS`: Maximum clickable/form elements returned per page. Defaults to `80`.
 

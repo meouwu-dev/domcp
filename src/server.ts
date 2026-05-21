@@ -16,6 +16,8 @@ const USER_AGENT =
 const REQUEST_DELAY_MS = Number.parseInt(process.env.DOMCP_REQUEST_DELAY_MS ?? "1000", 10);
 const FETCH_TIMEOUT_MS = Number.parseInt(process.env.DOMCP_FETCH_TIMEOUT_MS ?? "15000", 10);
 const NAVIGATION_TIMEOUT_MS = Number.parseInt(process.env.DOMCP_NAVIGATION_TIMEOUT_MS ?? "30000", 10);
+const RENDER_SETTLE_MS = Number.parseInt(process.env.DOMCP_RENDER_SETTLE_MS ?? "750", 10);
+const ACTION_SETTLE_MS = Number.parseInt(process.env.DOMCP_ACTION_SETTLE_MS ?? "500", 10);
 const THIN_CONTENT_CHARS = Number.parseInt(process.env.DOMCP_THIN_CONTENT_CHARS ?? "200", 10);
 const MAX_ELEMENTS = Number.parseInt(process.env.DOMCP_MAX_ELEMENTS ?? "80", 10);
 const USER_DATA_DIR = process.env.DOMCP_USER_DATA_DIR?.trim();
@@ -44,9 +46,25 @@ function envFlag(value: string | undefined, defaultValue: boolean) {
   return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
+type PageReadyUntil = "commit" | "domcontentloaded" | "load" | "networkidle";
+type LoadStateUntil = Exclude<PageReadyUntil, "commit">;
+
+function parsePageReadyUntil(value: string | undefined): PageReadyUntil {
+  if (value === "commit" || value === "domcontentloaded" || value === "load" || value === "networkidle") {
+    return value;
+  }
+
+  return "domcontentloaded";
+}
+
+function loadStateUntil(value: PageReadyUntil): LoadStateUntil {
+  return value === "commit" ? "domcontentloaded" : value;
+}
+
 const HEADLESS = envFlag(process.env.DOMCP_HEADLESS, true);
 const BROWSER_FIRST_WITH_PROFILE = envFlag(process.env.DOMCP_BROWSER_FIRST_WITH_PROFILE, Boolean(USER_DATA_DIR));
 const AI_AGENT_GUIDE_URL = new URL("../AI_AGENT_GUIDE.md", import.meta.url);
+const PAGE_READY_UNTIL = parsePageReadyUntil(process.env.DOMCP_PAGE_READY_UNTIL);
 
 type ActionableElement = {
   id: number;
@@ -65,6 +83,12 @@ type BrowserActionableElement = {
   role: ActionableElement["role"];
   text: string;
   href?: string;
+};
+
+type TextClickPayload = {
+  text: string;
+  exact: boolean;
+  occurrence: number;
 };
 
 type ToolPayload = Record<string, unknown> | string;
@@ -336,8 +360,14 @@ async function gotoRespectfully(url: string) {
   await assertRobotsAllowed(url);
   await respectfulDelay(new URL(url));
   const activePage = await ensureBrowser();
-  await activePage.goto(url, { waitUntil: "networkidle", timeout: NAVIGATION_TIMEOUT_MS });
+  await activePage.goto(url, { waitUntil: PAGE_READY_UNTIL, timeout: NAVIGATION_TIMEOUT_MS });
+  await sleep(RENDER_SETTLE_MS);
   return activePage;
+}
+
+async function settleAfterAction(activePage: Page) {
+  await activePage.waitForLoadState(loadStateUntil(PAGE_READY_UNTIL), { timeout: ACTION_SETTLE_MS }).catch(() => undefined);
+  await sleep(ACTION_SETTLE_MS);
 }
 
 function readableText(value: string | null | undefined) {
@@ -392,6 +422,65 @@ for (let index = 0; index < nodes.length; index += 1) {
 return results.filter((element) => element.visible);
 `,
 ) as (nodes: Element[]) => BrowserActionableElement[];
+
+const findTextClickPointInPage = new Function(
+  "payload",
+  `
+const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+const query = normalize(payload.text);
+const queryLower = query.toLowerCase();
+
+const isVisible = (element) => {
+  const style = window.getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+};
+
+const textNodes = [];
+const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+  acceptNode(node) {
+    const text = normalize(node.nodeValue);
+    if (!text) {
+      return NodeFilter.FILTER_REJECT;
+    }
+
+    const parent = node.parentElement;
+    if (!parent || !isVisible(parent)) {
+      return NodeFilter.FILTER_REJECT;
+    }
+
+    const matched = payload.exact ? text === query : text.toLowerCase().includes(queryLower);
+    return matched ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+  },
+});
+
+let node = walker.nextNode();
+while (node) {
+  const text = normalize(node.nodeValue);
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+  range.detach();
+
+  const rect = rects[0];
+  if (rect) {
+    textNodes.push({ text, rect });
+  }
+  node = walker.nextNode();
+}
+
+textNodes.sort((a, b) => a.text.length - b.text.length);
+const match = textNodes[payload.occurrence];
+if (!match) {
+  return null;
+}
+
+return {
+  x: match.rect.left + match.rect.width / 2,
+  y: match.rect.top + match.rect.height / 2,
+};
+`,
+) as (payload: TextClickPayload) => { x: number; y: number } | null;
 
 async function getRenderedMarkdown(activePage: Page) {
   const html = await activePage.content();
@@ -460,11 +549,22 @@ async function clickCurrentElement(elementId: number) {
 
   const target = activePage.locator(ACTIONABLE_SELECTOR).nth(element.selectorIndex);
 
-  await Promise.all([
-    activePage.waitForLoadState("networkidle", { timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined),
-    activePage.waitForNavigation({ waitUntil: "networkidle", timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined),
-    target.click({ timeout: NAVIGATION_TIMEOUT_MS }),
-  ]);
+  await target.click({ timeout: NAVIGATION_TIMEOUT_MS });
+  await settleAfterAction(activePage);
+
+  return pageState(activePage);
+}
+
+async function clickVisibleText(text: string, exact = false, occurrence = 0) {
+  const activePage = await ensureBrowser();
+  const point = await activePage.evaluate(findTextClickPointInPage, { text, exact, occurrence });
+
+  if (!point) {
+    throw new Error(`No visible text target matching "${text}".`);
+  }
+
+  await activePage.mouse.click(point.x, point.y);
+  await settleAfterAction(activePage);
 
   return pageState(activePage);
 }
@@ -495,7 +595,7 @@ const server = new McpServer({
   version: "0.1.0",
 }, {
   instructions:
-    "Use DOMCP as a DOM-first browser tool. For substantial browsing tasks, first load the MCP prompt /mcp__domcp__agent_guide when the client supports MCP prompts. Prefer navigate and get_current_state to read content and discover numbered action targets, then use click or type_text for interaction. Use screenshot only as a last fallback when DOM content/action targets are insufficient. Explain why before using screenshot.",
+    "Use DOMCP as a DOM-first browser tool. For substantial browsing tasks, first load the MCP prompt /mcp__domcp__agent_guide when the client supports MCP prompts. Prefer navigate and get_current_state to read content and discover numbered action targets, then use click or type_text for interaction. If desired visible text exists in contentMarkdown but is not exposed as a numbered action target, use click_text before screenshot. Use screenshot only as a last fallback when DOM content/action targets are insufficient. Explain why before using screenshot.",
 });
 
 server.prompt(
@@ -544,6 +644,20 @@ server.tool(
   async ({ elementId }) =>
     withToolErrors(async () => {
       return textResponse(await clickCurrentElement(elementId));
+    }),
+);
+
+server.tool(
+  "click_text",
+  "Fallback DOM action. Click visible text on the current page when the desired target appears in contentMarkdown but is not exposed as a numbered element. Useful for custom cards, rows, and non-semantic clickable containers. Prefer click(elementId) when a numbered target exists.",
+  {
+    text: z.string().min(1),
+    exact: z.boolean().optional(),
+    occurrence: z.number().int().nonnegative().optional(),
+  },
+  async ({ text, exact, occurrence }) =>
+    withToolErrors(async () => {
+      return textResponse(await clickVisibleText(text, exact ?? false, occurrence ?? 0));
     }),
 );
 

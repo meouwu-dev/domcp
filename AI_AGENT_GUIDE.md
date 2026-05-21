@@ -8,12 +8,13 @@ DOMCP is a DOM-first browsing MCP. Treat the structured DOM output as the main i
 
 Use this order:
 
-1. Use DOM tools first: `navigate`, `get_current_state`, `click`, and `type_text`.
+1. Use DOM tools first: `navigate`, `get_current_state`, `click`, `click_text`, and `type_text`.
 2. Read `contentMarkdown` for page meaning.
 3. Read `elements` for numbered interaction targets.
 4. Act on numbered targets with `click` or `type_text`.
-5. Use `screenshot` only when DOM output is insufficient, and explain why before using it.
-6. Ask the user to interact manually only when the action requires human control, credentials, CAPTCHA, payment confirmation, 2FA, or a browser state the agent cannot reach safely.
+5. If the desired visible text exists but no numbered target is exposed, use `click_text`.
+6. Use `screenshot` only when DOM output is insufficient, and explain why before using it.
+7. Ask the user to interact manually only when the action requires human control, credentials, CAPTCHA, payment confirmation, 2FA, or a browser state the agent cannot reach safely.
 
 ## Tool Roles
 
@@ -21,6 +22,7 @@ Use this order:
 - `navigate(url)`: Open a page in the persistent Chromium context and return both readable content and numbered action targets. Use this for most browsing tasks.
 - `get_current_state()`: Re-read the current page after waiting, user interaction, or a suspected page update.
 - `click(elementId)`: Click a numbered target from the latest `navigate` or `get_current_state` result.
+- `click_text(text, exact?, occurrence?)`: Fallback DOM action for visible text that appears in `contentMarkdown` but is not exposed as a numbered target. Use this for custom cards, rows, tiles, and non-semantic clickable containers before screenshot.
 - `type_text(elementId, text)`: Fill a numbered input or textarea.
 - `screenshot()`: Last fallback when DOM output cannot answer what is visible or what to do next.
 - `close()`: Close the browser context when the task is finished or stale.
@@ -33,9 +35,10 @@ Use this order:
 4. Use `elements` to find the best action target by `id`, `role`, `text`, and `href`.
 5. Call `click(elementId)` for navigation, selection, buttons, tabs, menu items, and clickable rows.
 6. Call `type_text(elementId, text)` for search boxes, address fields, forms, and other text inputs.
-7. After each action, inspect the returned state before deciding the next action.
-8. If the page updates asynchronously and the returned state looks stale, call `get_current_state()`.
-9. Repeat until the user goal is complete or a human decision/action is required.
+7. If the desired target appears in `contentMarkdown` but not in `elements`, call `click_text(text)`.
+8. After each action, inspect the returned state before deciding the next action.
+9. If the page updates asynchronously and the returned state looks stale, call `get_current_state()`.
+10. Repeat until the user goal is complete or a human decision/action is required.
 
 ## Headless And Visible Browser Use
 
@@ -97,8 +100,9 @@ If the content mentions an option but no matching element exists, try:
 
 1. Call `get_current_state()` once in case the page changed.
 2. Look for nearby text, shorter labels, icons, tabs, or parent-row text in `elements`.
-3. If still missing and the page is visible, explain the limitation and ask the user to click it manually.
-4. If visual inspection could solve it and manual action is not required, explain why and use `screenshot`.
+3. Use `click_text` with the most specific visible label, such as a store name or product title.
+4. If still missing and the page is visible, explain the limitation and ask the user to click it manually.
+5. If visual inspection could solve it and manual action is not required, explain why and use `screenshot`.
 
 ## Handling Common Sites
 
@@ -178,7 +182,7 @@ If DOM extraction fails:
 Agents can adapt this into a skill:
 
 ```text
-Use DOMCP as a DOM-first browser. For interactive browsing, start with navigate(url), then inspect contentMarkdown and elements. Use contentMarkdown to understand page state and use numbered elements for click(elementId) and type_text(elementId, text). After every action, inspect the returned state before continuing. Use get_current_state() after user interaction, asynchronous page updates, or when the page may have changed.
+Use DOMCP as a DOM-first browser. For interactive browsing, start with navigate(url), then inspect contentMarkdown and elements. Use contentMarkdown to understand page state and use numbered elements for click(elementId) and type_text(elementId, text). If the desired visible text appears in contentMarkdown but is not exposed as a numbered target, use click_text(text) before screenshot. After every action, inspect the returned state before continuing. Use get_current_state() after user interaction, asynchronous page updates, or when the page may have changed.
 
 Do not use screenshot by default. Screenshot is a last fallback only when DOM content/action targets are insufficient, such as canvas/WebGL, visually ambiguous controls, image-only pages, or broken DOM extraction. Before calling screenshot, explain why DOM output is insufficient. After screenshot, return to DOM tools whenever possible.
 
@@ -201,6 +205,9 @@ Need to choose next step?
 
 Target is numbered?
   Use click(elementId) or type_text(elementId, text).
+
+Target text is visible but not numbered?
+  Use click_text(text).
 
 Page may have changed?
   Use get_current_state().
