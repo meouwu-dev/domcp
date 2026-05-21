@@ -1,0 +1,5 @@
+node_modules/
+dist/
+domcp-profile*/
+.domcp-profile/
+.ai-working-dir/
